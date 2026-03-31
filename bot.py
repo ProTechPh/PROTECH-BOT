@@ -58,7 +58,7 @@ class RailwayAPI:
 
     @staticmethod
     def create_service(name, os_type):
-        image = "akari/ubuntu-desktop" if os_type == "ubuntu-desktop" else "ubuntu:22.04"
+        image = "akarita/docker-ubuntu-desktop" if os_type == "ubuntu-desktop" else "ubuntu:22.04"
         mutation = """
         mutation serviceCreate($input: ServiceCreateInput!) {
           serviceCreate(input: $input) {
