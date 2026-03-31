@@ -180,6 +180,35 @@ class RailwayAPI:
         res = RailwayAPI.query(mutation, variables)
         return res and "data" in res and res["data"]["variableUpsert"]
 
+    @staticmethod
+    def get_service_metrics(service_id):
+        query = """
+        query service($id: String!) {
+          service(id: $id) {
+            deployments(last: 1) {
+              edges {
+                node {
+                  usage {
+                    cpu
+                    memory
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        variables = {"id": service_id}
+        res = RailwayAPI.query(query, variables)
+        try:
+            # CPU is in cores (float), Memory is in GB (float)
+            usage = res["data"]["service"]["deployments"]["edges"][0]["node"]["usage"]
+            cpu = f"{usage['cpu']*100:.1f}%"
+            mem = f"{usage['memory']:.1f} GB"
+            return {"cpu": cpu, "mem": mem}
+        except:
+            return {"cpu": "N/A", "mem": "N/A"}
+
 # DB Queries
 def add_vps(user_id, container_id, container_name, os_type, hostname, ssh, days=1):
     conn = get_db_connection()
@@ -296,17 +325,17 @@ async def status(interaction: discord.Interaction):
         
     vps = vps_list[0]
     service_id = vps['container_id']
-    env_id = RailwayAPI.get_environment_id()
     
-    # Construct Railway Metrics Link
-    metrics_url = f"https://railway.com/project/{RAILWAY_PROJECT_ID}/service/{service_id}?environmentId={env_id}"
+    # Get Real-time Metrics from Railway
+    metrics = RailwayAPI.get_service_metrics(service_id)
     
     embed = discord.Embed(title="📊 VPS Status & Metrics", color=discord.Color.blue())
     embed.add_field(name="Name", value=vps['container_name'], inline=True)
     embed.add_field(name="OS", value="Ubuntu Desktop", inline=True)
     embed.add_field(name="Status", value="🟢 Online", inline=True)
+    embed.add_field(name="CPU Usage", value=f"`{metrics['cpu']}`", inline=True)
+    embed.add_field(name="RAM Usage", value=f"`{metrics['mem']}`", inline=True)
     embed.add_field(name="Web Access Link", value=f"[Open Desktop]({vps['ssh_command']})", inline=False)
-    embed.add_field(name="Real-time Metrics", value=f"[View CPU/RAM Graphs]({metrics_url})", inline=False)
     embed.set_footer(text=WATERMARK)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
