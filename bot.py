@@ -7,7 +7,6 @@ import re
 import time
 import discord
 from discord.ext import commands, tasks
-import docker
 import asyncio
 from discord import app_commands
 import sqlite3
