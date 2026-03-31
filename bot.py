@@ -40,26 +40,25 @@ WATERMARK = os.getenv('WATERMARK', 'Powered by ProTechPh VPS Bot')
 
 class RailwayAPI:
     @staticmethod
-    def query(query_str, variables=None):
+    def query(query, variables=None):
         if not RAILWAY_API_TOKEN:
-            logger.error("RAILWAY_API_TOKEN is not set.")
+            logging.error("RAILWAY_API_TOKEN is not set.")
             return None
-        headers = {
-            "Authorization": f"Bearer {RAILWAY_API_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        payload = {"query": query_str, "variables": variables or {}}
+        headers = {"Authorization": f"Bearer {RAILWAY_API_TOKEN}", "Content-Type": "application/json"}
+        payload = {"query": query, "variables": variables or {}}
         try:
-            response = requests.post(RAILWAY_API_URL, json=payload, headers=headers)
-            response.raise_for_status()
-            return response.json()
+            res = requests.post(RAILWAY_API_URL, headers=headers, json=payload)
+            data = res.json()
+            if "errors" in data:
+                logging.error(f"Railway API Errors: {json.dumps(data['errors'], indent=2)}")
+            return data
         except Exception as e:
-            logger.error(f"Railway API Request failed: {e}")
+            logging.error(f"Railway API Request failed: {e}")
             return None
 
     @staticmethod
     def create_service(name, os_type):
-        image = "accetto/ubuntu-vnc-xfce-g3" if os_type == "ubuntu-desktop" else "ubuntu:22.04"
+        image = "akari/ubuntu-desktop" if os_type == "ubuntu-desktop" else "ubuntu:22.04"
         mutation = """
         mutation serviceCreate($input: ServiceCreateInput!) {
           serviceCreate(input: $input) {
@@ -92,19 +91,47 @@ class RailwayAPI:
         return res and "data" in res and res["data"]["serviceDelete"]
 
     @staticmethod
-    def create_domain(service_id):
+    def create_domain(service_id, environment_id):
+        # We use serviceDomainCreate in Railway v2
         mutation = """
-        mutation domainCreate($input: DomainCreateInput!) {
-          domainCreate(input: $input) {
+        mutation serviceDomainCreate($input: ServiceDomainCreateInput!) {
+          serviceDomainCreate(input: $input) {
             domain
           }
         }
         """
-        variables = {"input": {"serviceId": service_id}}
+        variables = {
+            "input": {
+                "environmentId": environment_id,
+                "serviceId": service_id
+            }
+        }
         res = RailwayAPI.query(mutation, variables)
-        if res and "data" in res and res["data"]["domainCreate"]:
-            return res["data"]["domainCreate"]["domain"]
+        if res and "data" in res and res["data"]["serviceDomainCreate"]:
+            return res["data"]["serviceDomainCreate"]["domain"]
         return None
+
+    @staticmethod
+    def get_environment_id():
+        query = """
+        query environments($projectId: String!) {
+          environments(projectId: $projectId) {
+            edges {
+              node {
+                id
+                name
+              }
+            }
+          }
+        }
+        """
+        variables = {"projectId": RAILWAY_PROJECT_ID}
+        res = RailwayAPI.query(query, variables)
+        try:
+            # We return the first environment (usually 'production')
+            return res["data"]["environments"]["edges"][0]["node"]["id"]
+        except:
+            return None
 
     @staticmethod
     def set_service_variable(service_id, name, value):
@@ -736,8 +763,12 @@ async def create_simple_vps(interaction: discord.Interaction, os_type, duration_
     await asyncio.sleep(5)
     
     # Try to create a public domain for the user to access it
-    domain = RailwayAPI.create_domain(service_id)
-    access_line = f"https://{domain}" if domain else "Creating domain..."
+    env_id = RailwayAPI.get_environment_id()
+    if env_id:
+        domain = RailwayAPI.create_domain(service_id, env_id)
+        access_line = f"https://{domain}" if domain else "Creating domain..."
+    else:
+        access_line = "Project env not found."
     
     if os_type == "ubuntu-desktop":
         # Desktop already accessible via HTTP on port 6080 if configured in Railway?
