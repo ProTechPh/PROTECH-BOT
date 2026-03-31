@@ -57,7 +57,22 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='/', intents=intents)
-client = docker.from_env()
+# client = docker.from_env() # Removed as it causes crashes on environments without Docker socket
+
+def check_docker_availability():
+    """Checks if the docker CLI command is available in the system path."""
+    try:
+        subprocess.check_output(["docker", "--version"], stderr=subprocess.STDOUT)
+        logger.info("Docker CLI detected and available.")
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        logger.warning("!!! WARNING: Docker CLI NOT DETECTED !!!")
+        logger.warning("This bot requires Docker to manage VPS containers.")
+        logger.warning("If you are on Railway or similar, ensure you have a remote DOCKER_HOST configured.")
+        return False
+
+DOCKER_AVAILABLE = check_docker_availability()
+
 
 # ============================================
 # PREMIUM EMBED SYSTEM - Modern UI/UX Design
@@ -470,7 +485,12 @@ async def async_docker_rm(container_id):
         return False
 
 async def async_install_tmate(container_id, os_type):
-    install_cmd = "apt-get update && apt-get install -y tmate curl wget sudo openssh-client"
+    if os_type == "ubuntu-desktop":
+        # For Desktop, we install cloudflared to tunnel port 6080 (NoVNC)
+        install_cmd = "apt-get update && apt-get install -y curl wget sudo && curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb && dpkg -i cloudflared.deb"
+    else:
+        install_cmd = "apt-get update && apt-get install -y tmate curl wget sudo openssh-client"
+        
     try:
         proc = await asyncio.create_subprocess_exec(
             "docker", "exec", container_id, "bash", "-c", install_cmd,
@@ -479,13 +499,37 @@ async def async_install_tmate(container_id, os_type):
         )
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120.0)
         if proc.returncode != 0:
-            logger.warning(f"Tmate install warning for {container_id}: {stderr.decode()}")
+            logger.warning(f"Helper install warning for {container_id}: {stderr.decode()}")
         else:
-            logger.info(f"Tmate installed in {container_id}")
+            logger.info(f"Helper tools installed in {container_id}")
     except asyncio.TimeoutError:
-        logger.error(f"Tmate install timeout for {container_id}")
+        logger.error(f"Helper install timeout for {container_id}")
     except Exception as e:
-        logger.error(f"Failed to install tmate in {container_id}: {e}")
+        logger.error(f"Failed to install helper tools in {container_id}: {e}")
+
+async def capture_desktop_url(container_id):
+    """Starts cloudflared tunnel and captures the trycloudflare URL."""
+    try:
+        # Start cloudflared tunnel for the NoVNC port (6080)
+        # We use a background process inside the container
+        tunnel_cmd = "cloudflared tunnel --url http://127.0.0.1:6080 > /tmp/tunnel.log 2>&1 &"
+        await asyncio.create_subprocess_exec("docker", "exec", container_id, "bash", "-c", tunnel_cmd)
+        
+        # Wait a bit for the tunnel to generate a URL
+        for _ in range(15):
+            await asyncio.sleep(2)
+            check_url = "grep -o 'https://[-a-z0-9.]*trycloudflare.com' /tmp/tunnel.log"
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", container_id, "bash", "-c", check_url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode == 0 and stdout:
+                return stdout.decode().strip()
+    except Exception as e:
+        logger.error(f"Failed to capture desktop URL: {e}")
+    return None
 
 # SSH capture
 async def capture_ssh_session_line(process):
@@ -527,9 +571,30 @@ async def regen_ssh_command(interaction: discord.Interaction, vps_identifier, se
         if send_response:
             await interaction.response.send_message(embed=embed, ephemeral=True)
         return False
+    container_id = vps['container_id']
+    if vps['os_type'] == "ubuntu-desktop":
+        if send_response:
+            await interaction.response.defer(ephemeral=True)
+        desktop_url = await capture_desktop_url(container_id)
+        if desktop_url:
+            update_vps_ssh(container_id, desktop_url)
+            embed = discord.Embed(title="New Desktop Link Generated", description=f"Access your VPS Desktop here:\n{desktop_url}\n\n**Note:** It may take 1-2 minutes for the Desktop to fully initialize.", color=discord.Color.green(), timestamp=datetime.now(timezone.utc))
+            embed.set_footer(text=WATERMARK, icon_url=bot.user.avatar.url if bot.user.avatar else None)
+            try:
+                await target_user.send(embed=embed)
+            except discord.Forbidden:
+                if send_response:
+                    await interaction.followup.send("Link generated but could not DM you.", ephemeral=True)
+            if send_response:
+                await interaction.followup.send("New Desktop link sent to your DMs.", ephemeral=True)
+            return True
+        else:
+            if send_response:
+                await interaction.followup.send("Failed to generate Desktop link.", ephemeral=True)
+            return False
+
     if send_response:
         await interaction.response.defer(ephemeral=True)
-    container_id = vps['container_id']
     exec_process = await docker_exec_tmate(container_id)
     if exec_process:
         ssh_line = await capture_ssh_session_line(exec_process)
@@ -591,14 +656,14 @@ async def manage_vps(interaction: discord.Interaction, vps_identifier, action, t
         if success:
             update_vps_status(container_id, "running")
     if success:
-        os_name = "Ubuntu 22.04" if os_type == "ubuntu" else "Debian 12"
+        os_name = "Ubuntu Desktop" if os_type == "ubuntu-desktop" else ("Ubuntu 22.04" if os_type == "ubuntu" else "Debian 12")
         embed = create_success_embed(f"VPS {action.title()}ed Successfully", f"OS: {os_name}")
         if action in ["start", "restart"]:
             regen_success = await regen_ssh_command(interaction, vps_identifier, send_response=False, target_user=target_user)
             if regen_success:
-                embed.description += "\nNew SSH session sent to DMs."
+                embed.description += f"\nNew {'Desktop link' if os_type == 'ubuntu-desktop' else 'SSH session'} sent to DMs."
             else:
-                embed.description += "\nFailed to generate new SSH session."
+                embed.description += f"\nFailed to generate new {'Desktop link' if os_type == 'ubuntu-desktop' else 'SSH session'}."
         await interaction.followup.send(embed=embed, ephemeral=True)
     else:
         embed = create_error_embed(f"Failed to {action} the VPS")
@@ -626,17 +691,25 @@ async def reinstall_vps(interaction: discord.Interaction, vps_identifier, os_typ
     # Create new with unique name
     suffix = random.randint(1000, 9999)
     new_container_name = f"{os_type}-vps-{user_id}-{suffix}"
-    image = "ubuntu:22.04" if os_type == "ubuntu" else "debian:bookworm"
+    if os_type == "ubuntu-desktop":
+        image = "accetto/ubuntu-vnc-xfce-g3"
+    else:
+        image = "ubuntu:22.04" if os_type == "ubuntu" else "debian:bookworm"
     new_container_id = await async_docker_run(image, hostname, ram, cpu, disk, new_container_name)
     if new_container_id:
         await async_install_tmate(new_container_id, os_type)
-        await asyncio.sleep(10)  # Wait longer for install
-        exec_process = await docker_exec_tmate(new_container_id)
-        ssh_line = await capture_ssh_session_line(exec_process)
-        if ssh_line:
-            add_vps(user_id, new_container_id, new_container_name, os_type, hostname, ssh_line, ram, cpu, disk)
+        if os_type == "ubuntu-desktop":
+            access_line = await capture_desktop_url(new_container_id)
+            os_name = "Ubuntu Desktop"
+        else:
+            exec_process = await docker_exec_tmate(new_container_id)
+            access_line = await capture_ssh_session_line(exec_process)
             os_name = "Ubuntu 22.04" if os_type == "ubuntu" else "Debian 12"
-            embed = discord.Embed(title="VPS Reinstalled Successfully", description=f"OS: {os_name}\n```{ssh_line}```", color=discord.Color.green(), timestamp=datetime.now(timezone.utc))
+            
+        if access_line:
+            add_vps(user_id, new_container_id, new_container_name, os_type, hostname, access_line, ram, cpu, disk)
+            access_type = "Desktop Link" if os_type == "ubuntu-desktop" else "SSH Command"
+            embed = discord.Embed(title="VPS Reinstalled Successfully", description=f"OS: {os_name}\n{access_type}:\n```{access_line}```", color=discord.Color.green(), timestamp=datetime.now(timezone.utc))
             embed.set_footer(text=WATERMARK, icon_url=bot.user.avatar.url if bot.user.avatar else None)
             try:
                 await target_user.send(embed=embed)
@@ -645,7 +718,7 @@ async def reinstall_vps(interaction: discord.Interaction, vps_identifier, os_typ
             embed_success = discord.Embed(description="VPS has been reinstalled. Check your DMs for details.", color=discord.Color.green())
             await interaction.followup.send(embed=embed_success, ephemeral=True)
         else:
-            embed = discord.Embed(description="Reinstall failed: Unable to generate SSH.", color=discord.Color.red())
+            embed = discord.Embed(description="Reinstall failed: Unable to generate Access details.", color=discord.Color.red())
             await interaction.followup.send(embed=embed, ephemeral=True)
             await async_docker_rm(new_container_id)
     else:
@@ -671,7 +744,10 @@ async def create_simple_vps(interaction: discord.Interaction, os_type, duration_
     hostname = f"{VPS_HOSTNAME}-{user_id}"
     suffix = random.randint(1000, 9999)
     container_name = f"{os_type}-vps-{user_id}-{suffix}"
-    image = "ubuntu:22.04" if os_type == "ubuntu" else "debian:bookworm"
+    if os_type == "ubuntu-desktop":
+        image = "accetto/ubuntu-vnc-xfce-g3"
+    else:
+        image = "ubuntu:22.04" if os_type == "ubuntu" else "debian:bookworm"
     
     container_id = await async_docker_run(image, hostname, ram, cpu, disk, container_name)
     if not container_id:
@@ -679,22 +755,24 @@ async def create_simple_vps(interaction: discord.Interaction, os_type, duration_
         return
         
     await asyncio.sleep(5)
-    await async_install_tmate(container_id, os_type)
-    await asyncio.sleep(10)
-    exec_process = await docker_exec_tmate(container_id)
-    ssh_line = await capture_ssh_session_line(exec_process)
+    if os_type == "ubuntu-desktop":
+        access_line = await capture_desktop_url(container_id)
+    else:
+        exec_process = await docker_exec_tmate(container_id)
+        access_line = await capture_ssh_session_line(exec_process)
     
-    if ssh_line:
-        add_vps(user_id, container_id, container_name, os_type, hostname, ssh_line, ram, cpu, disk, duration_days)
-        os_name = "Ubuntu 22.04" if os_type == "ubuntu" else "Debian 12"
-        embed = create_success_embed("VPS Ready!", f"OS: {os_name}\nRAM: {ram} | CPU: {cpu} | Disk: {disk}\nDuration: **{duration_days} days**\n```\n{ssh_line}\n```")
+    if access_line:
+        add_vps(user_id, container_id, container_name, os_type, hostname, access_line, ram, cpu, disk, duration_days)
+        os_name = "Ubuntu Desktop" if os_type == "ubuntu-desktop" else ("Ubuntu 22.04" if os_type == "ubuntu" else "Debian 12")
+        access_type = "Desktop Link" if os_type == "ubuntu-desktop" else "SSH Command"
+        embed = create_success_embed("VPS Ready!", f"OS: {os_name}\nRAM: {ram} | CPU: {cpu} | Disk: {disk}\nDuration: **{duration_days} days**\n{access_type}:\n```\n{access_line}\n```")
         try:
             await target_user.send(embed=embed)
         except:
             pass
         await interaction.followup.send(embed=create_success_embed("VPS Online", "Check your DMs for access details."), ephemeral=True)
     else:
-        await interaction.followup.send(embed=create_error_embed("Installation Error", "Unable to generate SSH session."), ephemeral=True)
+        await interaction.followup.send(embed=create_error_embed("Installation Error", "Unable to generate Access details."), ephemeral=True)
         await async_docker_stop(container_id)
         await async_docker_rm(container_id)
 
@@ -1096,8 +1174,9 @@ async def user_logs(interaction: discord.Interaction, vps_identifier: str, lines
 @bot.tree.command(name="deploy", description="Deploy a new free VPS instance")
 @app_commands.describe(os_type="Choose OS", duration="Duration in days")
 @app_commands.choices(os_type=[
-    app_commands.Choice(name="Ubuntu 22.04", value="ubuntu"),
-    app_commands.Choice(name="Debian 12", value="debian")
+    app_commands.Choice(name="Ubuntu 22.04 (Terminal)", value="ubuntu"),
+    app_commands.Choice(name="Debian 12 (Terminal)", value="debian"),
+    app_commands.Choice(name="Ubuntu Desktop (Web GUI)", value="ubuntu-desktop")
 ], duration=[
     app_commands.Choice(name="1 Day", value=1),
     app_commands.Choice(name="3 Days", value=3),
@@ -1109,8 +1188,9 @@ async def deploy(interaction: discord.Interaction, os_type: str, duration: int):
 @bot.tree.command(name="admin-create", description="Admin: Create a VPS for a user with optional custom resources")
 @app_commands.describe(target_user="The target user", os_type="OS type", ram="RAM e.g. 2g (optional)", cpu="CPU cores (optional)", disk="Disk e.g. 20G (optional)")
 @app_commands.choices(os_type=[
-    app_commands.Choice(name="Ubuntu", value="ubuntu"),
-    app_commands.Choice(name="Debian", value="debian")
+    app_commands.Choice(name="Ubuntu 22.04 (Terminal)", value="ubuntu"),
+    app_commands.Choice(name="Debian 12 (Terminal)", value="debian"),
+    app_commands.Choice(name="Ubuntu Desktop (Web GUI)", value="ubuntu-desktop")
 ])
 async def admin_create(interaction: discord.Interaction, target_user: discord.User, os_type: str, ram: str = None, cpu: str = None, disk: str = None):
     if not is_admin(interaction.user):
@@ -1211,8 +1291,9 @@ async def restart_vps(interaction: discord.Interaction, vps_identifier: str):
 @bot.tree.command(name="reinstall", description="Reinstall your VPS with a new OS")
 @app_commands.describe(vps_identifier="VPS ID or Name", os_type="The new OS type")
 @app_commands.choices(os_type=[
-    app_commands.Choice(name="Ubuntu", value="ubuntu"),
-    app_commands.Choice(name="Debian", value="debian")
+    app_commands.Choice(name="Ubuntu 22.04 (Terminal)", value="ubuntu"),
+    app_commands.Choice(name="Debian 12 (Terminal)", value="debian"),
+    app_commands.Choice(name="Ubuntu Desktop (Web GUI)", value="ubuntu-desktop")
 ])
 async def reinstall(interaction: discord.Interaction, vps_identifier: str, os_type: str = "ubuntu"):
     await reinstall_vps(interaction, vps_identifier, os_type)
