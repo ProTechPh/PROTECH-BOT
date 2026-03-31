@@ -768,7 +768,11 @@ async def create_simple_vps(interaction: discord.Interaction, os_type, duration_
     # Try to create a public domain for the user to access it
     if env_id:
         domain = RailwayAPI.create_domain(service_id, env_id)
-        access_line = f"https://{domain}" if domain else "Creating domain..."
+        if domain:
+            suffix = "/vnc.html" if os_type == "ubuntu-desktop" else ""
+            access_line = f"https://{domain}{suffix}"
+        else:
+            access_line = "Creating domain..."
     else:
         access_line = "Project env not found."
     
