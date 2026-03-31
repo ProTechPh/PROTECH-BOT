@@ -27,8 +27,6 @@ RAILWAY_API_TOKEN = os.getenv('RAILWAY_API_TOKEN')
 RAILWAY_PROJECT_ID = os.getenv('RAILWAY_PROJECT_ID')
 RAILWAY_API_URL = os.getenv('RAILWAY_API_URL', 'https://backboard.railway.app/graphql/v2')
 
-DEFAULT_RAM = os.getenv('DEFAULT_RAM', '2g')
-DEFAULT_CPU = os.getenv('DEFAULT_CPU', '1')
 DEFAULT_DISK = os.getenv('DEFAULT_DISK', '10g')
 BOT_STATUS_NAME = os.getenv('BOT_STATUS_NAME', 'ProTechPh VPS')
 WATERMARK = os.getenv('WATERMARK', 'Powered by ProTechPh VPS Bot')
@@ -183,14 +181,14 @@ class RailwayAPI:
         return res and "data" in res and res["data"]["variableUpsert"]
 
 # DB Queries
-def add_vps(user_id, container_id, container_name, os_type, hostname, ssh, ram, cpu, disk, days=1):
+def add_vps(user_id, container_id, container_name, os_type, hostname, ssh, days=1):
     conn = get_db_connection()
     c = conn.cursor()
     created_at = datetime.now(timezone.utc).isoformat()
     expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
-    c.execute('''INSERT INTO vps (user_id, container_id, container_name, os_type, hostname, status, ram, cpu, disk, created_at, expires_at, ssh_command)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-              (user_id, container_id, container_name, os_type, hostname, 'running', ram, cpu, disk, created_at, expires_at, ssh))
+    c.execute('''INSERT INTO vps (user_id, container_id, container_name, os_type, hostname, status, created_at, expires_at, ssh_command)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+              (user_id, container_id, container_name, os_type, hostname, 'running', created_at, expires_at, ssh))
     conn.commit()
     conn.close()
 
@@ -279,7 +277,7 @@ async def deploy(interaction: discord.Interaction, duration: int = 1):
         if domain:
             access_line = f"https://{domain}/vnc.html"
             
-    add_vps(interaction.user.id, service_id, container_name, "ubuntu-desktop", container_name, access_line, DEFAULT_RAM, DEFAULT_CPU, DEFAULT_DISK, duration)
+    add_vps(interaction.user.id, service_id, container_name, "ubuntu-desktop", container_name, access_line, duration)
     
     embed = discord.Embed(
         title="✓ Desktop VPS Ready!",
@@ -288,10 +286,6 @@ async def deploy(interaction: discord.Interaction, duration: int = 1):
         timestamp=datetime.now(timezone.utc)
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
-    try:
-        await interaction.user.send(embed=embed)
-    except:
-        pass
 
 @bot.tree.command(name="status", description="📊 Check your Desktop VPS status.")
 async def status(interaction: discord.Interaction):
@@ -301,11 +295,19 @@ async def status(interaction: discord.Interaction):
         return
         
     vps = vps_list[0]
-    embed = discord.Embed(title="VPS Status", color=discord.Color.blue())
+    service_id = vps['container_id']
+    env_id = RailwayAPI.get_environment_id()
+    
+    # Construct Railway Metrics Link
+    metrics_url = f"https://railway.com/project/{RAILWAY_PROJECT_ID}/service/{service_id}?environmentId={env_id}"
+    
+    embed = discord.Embed(title="📊 VPS Status & Metrics", color=discord.Color.blue())
     embed.add_field(name="Name", value=vps['container_name'], inline=True)
     embed.add_field(name="OS", value="Ubuntu Desktop", inline=True)
     embed.add_field(name="Status", value="🟢 Online", inline=True)
-    embed.add_field(name="Access Link", value=f"```{vps['ssh_command']}```", inline=False)
+    embed.add_field(name="Web Access Link", value=f"[Open Desktop]({vps['ssh_command']})", inline=False)
+    embed.add_field(name="Real-time Metrics", value=f"[View CPU/RAM Graphs]({metrics_url})", inline=False)
+    embed.set_footer(text=WATERMARK)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="remove", description="🗑️ Stop and delete your VPS.")
