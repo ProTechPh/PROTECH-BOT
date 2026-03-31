@@ -134,7 +134,7 @@ class RailwayAPI:
             return None
 
     @staticmethod
-    def set_service_variable(service_id, name, value):
+    def set_service_variable(service_id, environment_id, name, value):
         mutation = """
         mutation variableUpsert($input: VariableUpsertInput!) {
           variableUpsert(input: $input)
@@ -143,6 +143,7 @@ class RailwayAPI:
         variables = {
             "input": {
                 "projectId": RAILWAY_PROJECT_ID,
+                "environmentId": environment_id,
                 "serviceId": service_id,
                 "name": name,
                 "value": value
@@ -756,14 +757,15 @@ async def create_simple_vps(interaction: discord.Interaction, os_type, duration_
         return
         
     # Set the PORT variable so Railway knows where to route traffic
-    # accetto/ubuntu-vnc-xfce-g3 usually uses 6901 or 6080. We'll try to set PORT to 6080 for NoVNC.
+    # akarita/docker-ubuntu-desktop uses 6080. We'll set PORT to 6080.
     target_port = "6080"
-    RailwayAPI.set_service_variable(service_id, "PORT", target_port)
+    env_id = RailwayAPI.get_environment_id()
+    if env_id:
+        RailwayAPI.set_service_variable(service_id, env_id, "PORT", target_port)
     
     await asyncio.sleep(5)
     
     # Try to create a public domain for the user to access it
-    env_id = RailwayAPI.get_environment_id()
     if env_id:
         domain = RailwayAPI.create_domain(service_id, env_id)
         access_line = f"https://{domain}" if domain else "Creating domain..."
