@@ -21,6 +21,8 @@ import requests
 load_dotenv()
 
 # Configuration
+TOKEN = os.getenv('TOKEN')
+ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 RAILWAY_API_TOKEN = os.getenv('RAILWAY_API_TOKEN')
 RAILWAY_PROJECT_ID = os.getenv('RAILWAY_PROJECT_ID')
 RAILWAY_API_URL = os.getenv('RAILWAY_API_URL', 'https://backboard.railway.app/graphql/v2')
