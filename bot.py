@@ -327,6 +327,11 @@ async def about(interaction: discord.Interaction):
     embed.set_footer(text=WATERMARK)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@bot.tree.command(name="ping", description="🏓 Check the bot's latency.")
+async def ping(interaction: discord.Interaction):
+    latency = round(bot.latency * 1000)
+    await interaction.response.send_message(f"🏓 Pong! Latency: **{latency}ms**", ephemeral=True)
+
 # Admin Commands
 @bot.tree.command(name="admin-list", description="👑 Admin: List all VPS.")
 async def admin_list(interaction: discord.Interaction):
